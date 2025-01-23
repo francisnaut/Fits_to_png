@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jan 8 11:48:03 2025
+@author: fran
+"""
+import os
+import numpy as np
+import argparse
+from astropy.io import fits
+from pyds9 import DS9
+from astropy.stats import sigma_clipped_stats
+from tabulate import tabulate
+import time
+import subprocess
+
+# Create a new DS9 instance
+ds9 = DS9()
+
+# Setup argument parser to handle input parameters
+parser = argparse.ArgumentParser(description='Process FITS files in subdirectories and apply scaling limits.')
+parser.add_argument('directory', type=str, help='Directory path containing FITS files')
+parser.add_argument('scale_min', type=float, help='Minimum scale value')
+parser.add_argument('scale_max', type=float, help='Maximum scale value')
+
+# Parse the command-line arguments
+args = parser.parse_args()
+
+# Define the path to the directory containing FITS files
+base_path = args.directory
+container_folder_name = os.path.basename(base_path)
+
+# Search for all FITS files in the subdirectories
+fits_files = []
+for root, dirs, files in os.walk(base_path):
+    for file in files:
+        if file.endswith('.fits'):
+            fits_files.append(os.path.join(root, file))
+fits_files.sort()  # Sort the FITS files list
+
+# List of colormaps to apply for visualization
+colormaps = ['heat', 'grey']
+
+# Define the path for saving statistics
+statistics_file_path = os.path.join(base_path, f'estadisticas_ds9_{container_folder_name}.txt')
+with open(statistics_file_path, 'w') as estadisticas_file:
+    estadisticas_file.write(f"Statistics for directory: {container_folder_name}\n\n")
+
+    # Process each FITS file
+    for fits_file in fits_files:
+        try:
+            print(f'{fits_file}')
+            ds9.set(f'fits new {fits_file}')
+            ds9.set(f'header save {fits_file}_header.txt')  # Export FITS header
+            print('Header saved successfully')
+        except ValueError as e:
+            print(f'Error saving the Header, please check the FITS file Error: {e}')
+        
+        # Open the FITS file and extract the image data
+        with fits.open(fits_file) as hdul:
+            image_data = np.squeeze(np.array(hdul[0].data, dtype=np.float64))  # FITS image data
+
+        # Get image dimensions (rows, columns)
+        n_rows, n_cols = image_data.shape
+        
+        # Calculate the center of the image
+        center_x = n_cols // 2
+        center_y = n_rows // 2
+        
+        # Calculate statistics of the image
+        mean, median, std = sigma_clipped_stats(image_data, sigma=3.0)
+        min_value = np.min(image_data)
+        max_value = np.max(image_data)
+        var_value = np.var(image_data)
+        rms_value = np.sqrt(np.mean(np.square(image_data)))
+        sum_value = np.sum(image_data)
+        total_pixels = image_data.size
+
+        # Write the statistics to the output file
+        estadisticas_file.write(f"File: {fits_file}\n")
+        estadisticas_file.write(f"Min: {min_value}\n")
+        estadisticas_file.write(f"Max: {max_value}\n")
+        estadisticas_file.write(f"Mean: {mean}\n")
+        estadisticas_file.write(f"Median: {median}\n")
+        estadisticas_file.write(f"Var: {var_value}\n")
+        estadisticas_file.write(f"Stddev: {std}\n")
+        estadisticas_file.write(f"RMS: {rms_value}\n")
+        estadisticas_file.write(f"Sum: {sum_value}\n")
+        estadisticas_file.write(f"Npix: {total_pixels}\n\n")
+
+        # Display the statistics in a table format
+        table_data = [
+            ["File", fits_file],
+            ["Min", min_value],
+            ["Max", max_value],
+            ["Mean", mean],
+            ["Median", median],
+            ["Var", var_value],
+            ["Stddev", std],
+            ["RMS", rms_value],
+            ["Sum", sum_value],
+            ["Npix", total_pixels]
+        ]
+
+        print(tabulate(table_data, headers=["Statistic", "Value"], tablefmt="grid"))
+
+        # Loop through the colormaps and process each one
+        for colormap in colormaps:
+            ds9.set('zoom to fit')
+            ds9.set('scale linear')
+            ds9.set(f'cmap {colormap}')
+            ds9.set('view colorbar yes')
+            ds9.set(f'scale limits {args.scale_min} {args.scale_max}')
+
+            # Send the image data to DS9 for visualization
+            ds9.set_np2arr(image_data)
+
+            # Define export name and path
+            export_name = f"{os.path.splitext(os.path.basename(fits_file))[0]}_{colormap}_{args.scale_min}_{args.scale_max}.png"
+            export_path = os.path.join(os.path.dirname(fits_file), export_name)
+
+            try:
+                ds9.set(f'export png {export_path}')
+                print(f"Image successfully exported as {export_path}")
+            except ValueError as e:
+                print(f"Error exporting image {export_path}: {e}")
+            
+            # Additional DS9 settings for graph and crosshair
+            ds9.set(f'crosshair {center_x} {center_y} physical')
+            ds9.set('view graph horizontal')
+            ds9.set('view graph vertical')
+            ds9.set('graph method average')
+            ds9.set('graph fontsize 8')
+            ds9.set('graph log yes')
+
+            # Save image in EPS format and convert to PNG
+            export_name = f"{os.path.splitext(os.path.basename(fits_file))[0]}_{colormap}_{args.scale_min}_{args.scale_max}_graph.eps"
+            export_path = os.path.join(os.path.abspath(base_path), export_name)
+            time.sleep(1)
+            try:
+                ds9.set(f'saveimage eps {export_path}')
+                print(f"Image exported as EPS: {export_path}")
+            except Exception:
+                print(f'Error saving image {export_name}')
+
+            # Convert the EPS file to PNG using ImageMagick
+            try:
+                png_export_path = export_path.replace('.eps', '.png')
+                subprocess.run(['convert', export_path, png_export_path], check=True)
+                print(f"Image converted to PNG: {png_export_path}")
+            except subprocess.CalledProcessError as e:
+                print(f'Error converting {export_name} to PNG: {e}')
+
+print("Well Done")
+print(f"All FITS images in the directory and subdirectories have been processed and exported. Statistics saved in {statistics_file_path}")
